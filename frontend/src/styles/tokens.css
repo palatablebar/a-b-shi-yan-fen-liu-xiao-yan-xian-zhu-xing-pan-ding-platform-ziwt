@@ -1,0 +1,50 @@
+/* 设计 token：实验室记录本风。
+   暖白方格纸 + 深墨绿墨水 + 红色批注 + 铅笔灰；全部 oklch，禁止组件内硬编码颜色。 */
+:root {
+  /* ---- 纸张 ---- */
+  --paper: oklch(0.972 0.012 95);
+  --paper-raised: oklch(0.986 0.008 95);
+  --paper-deep: oklch(0.944 0.015 95);
+  --paper-sunk: oklch(0.925 0.018 95);
+  --grid-line: oklch(0.9 0.02 200 / 0.5);
+  --grid-line-major: oklch(0.855 0.028 200 / 0.62);
+  --margin-line: oklch(0.76 0.12 26 / 0.5);
+
+  /* ---- 墨水 ---- */
+  --ink: oklch(0.31 0.045 168);
+  --ink-strong: oklch(0.235 0.05 168);
+  --ink-soft: oklch(0.46 0.03 168);
+  --ink-faint: oklch(0.6 0.022 168);
+  --rule: oklch(0.81 0.024 168);
+  --rule-soft: oklch(0.875 0.018 168);
+
+  /* ---- 批注与判定 ---- */
+  --red: oklch(0.53 0.17 26);
+  --red-deep: oklch(0.43 0.16 26);
+  --red-wash: oklch(0.94 0.028 26);
+  --ok: oklch(0.47 0.1 172);
+  --ok-wash: oklch(0.94 0.03 172);
+  --warn: oklch(0.56 0.13 72);
+  --warn-wash: oklch(0.955 0.035 82);
+  --fail: oklch(0.5 0.17 28);
+  --fail-wash: oklch(0.94 0.03 28);
+  --unread: oklch(0.44 0.05 282);
+  --unread-wash: oklch(0.945 0.018 282);
+
+  /* ---- 字体 ---- */
+  --font-display: 'Spectral', 'Songti SC', 'Noto Serif SC', 'Source Han Serif SC', serif;
+  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', 'Menlo', 'Consolas', monospace;
+
+  /* ---- 间距与节奏 ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --rail-w: 232px;
+  --top-h: 60px;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --grid: 24px;
+}
