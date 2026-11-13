@@ -1,20 +1,28 @@
-"""分析编排：SRM → 指标对比 → 分层 BH → 守卫指标回归 → 固定规则结论。
+"""分析编排：SRM → 逐方案指标对比 → 分层 BH → 守卫指标回归 → 全方案统一 BH → 固定规则结论。
+
+支持两种形态：
+- 两臂（对照 + 单一处理）：沿用历史口径，主指标按原始 p 判定（单一预注册主指标），
+  批次顶层字段（srm/metrics/strata/comparisons/guard/verdict…）结构保持不变；
+- 多臂（共同对照 + ≥2 个处理方案）：每个处理方案都以同一个对照臂为基准做
+  配对 SRM 与指标检验；所有方案的主/守卫/辅助/分层检验合并进**同一个 BH family**
+  做一次多重比较校正；逐方案给出 verdict 与 ship_state（可上线状态），
+  守卫生效或校正后失真的方案一律 blocked，不能被当成赢家。
 
 计算口径（写进 README/报告）：
-- SRM：曝光次数口径（exposure），χ² = Σ(O−E)²/E，df = k−1，p < srm_threshold 判 SRM 并锁定结论
+- SRM：曝光次数口径（exposure），全实验 χ² = Σ(O−E)²/E，df=k−1，p < srm_threshold 判 SRM 并锁定结论；
+  多臂时额外对「共同对照 vs 每个处理方案」做配对 SRM
 - 指标：用户级样本；比例用两比例 z（合并方差），均值用 Welch t
 - 效应：lift = (处理组 − 对照组) / 对照组；lift_ci95 由 diff 的 95% CI 同除对照组基准
 - MDE：80% 功效、双侧 α，比例/均值分别按各自标准误计算
-- 多重比较：分层内 BH（family=strata）+ 全量 BH（primary/guard/secondary/strata 合并）；
-  守卫指标在守卫族内单独 BH，任一显著变差 → 结论 fail
+- 多重比较：分层内 BH（family=strata，逐方案各自一个族）+ 守卫族内 BH（逐方案）+
+  全量 BH（多臂时跨全部方案的 primary/guard/secondary/strata 合并为一个族）
 - 结论固定规则：SRM/样本不足 → unreadable（SRM 时 locked）；
-  守卫回归或主指标不显著 → fail；分层异质性（≥2 个分层原始显著但 BH 后不显著）、
-  分层反向显著、观测效应低于 MDE → warn；其余 pass
+  守卫回归或主指标不显著（多臂还要求全量 BH 后仍显著）→ fail；分层异质性
+  （≥2 个分层原始显著但 BH 后不显著）、分层反向显著、观测效应低于 MDE → warn；其余 pass
 """
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func
@@ -27,6 +35,7 @@ from src.constants.enums import (
     GuardState,
     MetricKind,
     RunStatus,
+    ShipState,
     SrmVerdict,
     Verdict,
 )
@@ -123,7 +132,7 @@ def _strata_tests(
     treat_id: int,
     alpha: float,
 ) -> dict[str, Any]:
-    """按 城市 × 客群 分层，执行主指标检验 + 分层内 BH。"""
+    """按 城市 × 客群 分层，执行主指标检验 + 分层内 BH（单个方案一个族）。"""
     grouped: dict[tuple[str, str], dict[int, list[Assignment]]] = defaultdict(
         lambda: {control_id: [], treat_id: []}
     )
@@ -258,9 +267,22 @@ def _evaluate_guards(
     return {"checks": checks, "regression": regression, "family": family}
 
 
-def _decide(
-    experiment: Experiment,
-    srm: dict[str, Any],
+def _variant_brief(variant: Any) -> dict[str, Any]:
+    return {
+        "id": variant.id,
+        "code": variant.code,
+        "name": variant.name,
+        "traffic_allocation": variant.traffic_allocation,
+        "is_control": variant.is_control,
+        "description": variant.description or "",
+    }
+
+
+def _decide_arm(
+    *,
+    variant_code: str,
+    srm_global: dict[str, Any],
+    srm_pair: dict[str, Any],
     primary: dict[str, Any],
     guards: dict[str, Any],
     strata: dict[str, Any],
@@ -268,34 +290,61 @@ def _decide(
     min_sample: int,
     control_n: int,
     treat_n: int,
-) -> tuple[str, list[str], bool]:
+    multi_arm: bool,
+    primary_q: float | None,
+) -> tuple[str, list[str], str]:
+    """单个处理方案的固定规则判定，返回 (verdict, reasons, ship_state)。"""
     reasons: list[str] = []
-    if srm["verdict"] == SrmVerdict.DETECTED.value:
-        reasons.append(f"SRM 分流失衡：{srm['reason']}")
-        reasons.append("分流失衡期间指标不可采信 → 结论锁定为「不可读」，需先修分流器/埋点后重跑")
-        return Verdict.UNREADABLE.value, reasons, True
-    if srm["verdict"] == SrmVerdict.INSUFFICIENT.value:
-        reasons.append(f"曝光量不足：{srm['reason']}")
-        return Verdict.UNREADABLE.value, reasons, True
+    stat = primary["stat"]
+
+    if srm_global["verdict"] == SrmVerdict.DETECTED.value:
+        reasons.append(f"全实验 SRM 分流失衡：{srm_global['reason']}")
+        reasons.append("分流失衡期间指标不可采信 → 该方案结论锁定为「不可读」，需先修分流器/埋点后重跑")
+        return Verdict.UNREADABLE.value, reasons, ShipState.BLOCKED.value
+    if srm_global["verdict"] == SrmVerdict.INSUFFICIENT.value:
+        reasons.append(f"曝光量不足：{srm_global['reason']}")
+        return Verdict.UNREADABLE.value, reasons, ShipState.BLOCKED.value
+    if srm_pair["verdict"] == SrmVerdict.DETECTED.value:
+        reasons.append(
+            f"方案 {variant_code} 相对共同对照的配对分流校验失衡：{srm_pair['reason']}"
+            " → 该方案不可读，需先修分流器/埋点后重跑"
+        )
+        return Verdict.UNREADABLE.value, reasons, ShipState.BLOCKED.value
+    if srm_pair["verdict"] == SrmVerdict.INSUFFICIENT.value:
+        reasons.append(
+            f"方案 {variant_code} 配对曝光量不足：{srm_pair['reason']} → 该方案不可读"
+        )
+        return Verdict.UNREADABLE.value, reasons, ShipState.BLOCKED.value
     if min(control_n, treat_n) < min_sample:
         reasons.append(
             f"样本不足：最小臂样本 {min(control_n, treat_n)} < 阈值 {min_sample} → 结论不可读"
         )
-        return Verdict.UNREADABLE.value, reasons, False
+        return Verdict.UNREADABLE.value, reasons, ShipState.BLOCKED.value
 
     if guards["regression"]:
         bad = [check for check in guards["checks"] if check["state"] == GuardState.REGRESSION.value]
         reasons.append(
-            "守卫指标显著变差：" + "，".join(f"{c['code']}" for c in bad) + " → 结论 fail"
+            "守卫指标显著变差：" + "，".join(f"{c['code']}" for c in bad) + " → 禁止上线，结论 fail"
         )
-        return Verdict.FAIL.value, reasons, False
+        if multi_arm and (primary_q is None or primary_q > alpha):
+            reasons.append(
+                f"同时主指标全方案统一 BH 校正后失真（q={primary_q:.4f} > α={alpha}），"
+                "原始显著不能作为上线依据"
+            )
+        return Verdict.FAIL.value, reasons, ShipState.BLOCKED.value
 
-    stat = primary["stat"]
     if stat["p_value"] is None or stat["p_value"] >= alpha:
         reasons.append(
             f"主指标未达显著：p={stat['p_value']:.4f} ≥ α={alpha} → 不能判定上线"
         )
-        return Verdict.FAIL.value, reasons, False
+        return Verdict.FAIL.value, reasons, ShipState.BLOCKED.value
+
+    if multi_arm and (primary_q is None or primary_q > alpha):
+        reasons.append(
+            f"主指标原始显著（p={stat['p_value']:.4f}），但全方案统一 BH 校正后 q={primary_q:.4f} > α={alpha}"
+            "：校正后失真，不能当赢家 → 结论 fail"
+        )
+        return Verdict.FAIL.value, reasons, ShipState.BLOCKED.value
 
     warn_reasons: list[str] = []
     flagged = [
@@ -333,15 +382,22 @@ def _decide(
             "（结论处于功效边界，建议延长实验）"
         )
 
+    primary_head = (
+        f"主指标显著（lift={stat['lift'] * 100:+.2f}%, p={stat['p_value']:.4f}"
+        + (f", 全方案 BH q={primary_q:.4f}）" if multi_arm else "）")
+    )
     if warn_reasons:
-        reasons.append(f"主指标显著（lift={stat['lift'] * 100:+.2f}%, p={stat['p_value']:.4f}）")
+        reasons.append(primary_head)
         reasons.extend(warn_reasons)
-        reasons.append("按固定规则判定为 warn：可继续观察/带风险上线，需记录决策理由")
-        return Verdict.WARN.value, reasons, False
+        reasons.append("按固定规则判定为 warn：仅可继续观察/带风险评审，不可直接放量")
+        return Verdict.WARN.value, reasons, ShipState.WATCH_ONLY.value
 
-    reasons.append(f"主指标显著（lift={stat['lift'] * 100:+.2f}%, p={stat['p_value']:.4f}）")
-    reasons.append("分层方向一致、守卫指标无回归 → 判定 pass")
-    return Verdict.PASS.value, reasons, False
+    reasons.append(primary_head)
+    tail = "分层方向一致、守卫指标无回归"
+    if multi_arm:
+        tail += "、全方案 BH 校正后仍显著"
+    reasons.append(tail + " → 判定 pass")
+    return Verdict.PASS.value, reasons, ShipState.SHIP_ELIGIBLE.value
 
 
 class AnalysisService:
@@ -350,10 +406,10 @@ class AnalysisService:
 
     # ------------------------------------------------------------- 创建批次 ----
     def create_run(self, experiment: Experiment, actor_email: str) -> AnalysisRun:
-        if len(experiment.variants) != 2:
+        if len(experiment.variants) < 2:
             raise AppError(
                 codes.VALIDATION_FAILED,
-                "统计判定需要恰好 2 个变体（对照组 + 实验组）",
+                "统计判定至少需要 2 个变体（1 个共同对照 + ≥1 个处理方案）",
                 f"experiment={experiment.code}",
                 422,
             )
@@ -375,6 +431,7 @@ class AnalysisService:
                 "srm_unit": "exposure",
                 "metric_unit": "user",
                 "mde_power": 0.8,
+                "multi_arm": len(experiment.variants) > 2,
             },
         )
         self.db.add(run)
@@ -423,6 +480,7 @@ class AnalysisService:
         run.strata = payload["strata"]
         run.comparisons = payload["comparisons"]
         run.guard = payload["guard"]
+        run.arms = payload.get("arms")
         run.verdict = payload["verdict"]
         run.verdict_reasons = payload["verdict_reasons"]
         run.locked = payload["locked"]
@@ -442,30 +500,16 @@ class AnalysisService:
         min_sample = int(experiment.min_sample_per_arm or settings.min_sample_per_arm)
 
         variants = ordered_variants(experiment)
-        control, treat = variants[0], variants[1]
+        control = variants[0]
+        treats = variants[1:]
+        multi_arm = len(treats) > 1
+
         assignments = load_assignments(self.db, experiment.id)
         counts = variant_counts(assignments)
-
-        # ---- 1) SRM 分流校验（曝光次数口径）----
-        expected_ratio = [control.traffic_allocation, treat.traffic_allocation]
-        total_ratio = sum(expected_ratio) or 1.0
-        expected_ratio = [r / total_ratio for r in expected_ratio]
-        srm = srm_test(
-            [counts[control.id]["exposures"], counts[treat.id]["exposures"]],
-            expected_ratio,
-            threshold=srm_threshold,
-            min_exposures=settings.min_srm_exposures,
-        )
-        srm["unit"] = "exposure"
-        srm["variant_codes"] = [control.code, treat.code]
-        srm["variant_names"] = [control.name, treat.name]
-
-        # ---- 2) 指标对比（用户级样本）----
-        metrics_by_id = {m.id: m for m in self.db.query(Metric).all()}
         grouped = _rows_by_variant(assignments)
         control_rows = grouped[control.id]
-        treat_rows = grouped[treat.id]
 
+        metrics_by_id = {m.id: m for m in self.db.query(Metric).all()}
         primary_metric = metrics_by_id.get(experiment.primary_metric_id)
         if primary_metric is None:
             raise AppError(
@@ -480,80 +524,289 @@ class AnalysisService:
             if mid in metrics_by_id
         ]
 
-        comparisons: dict[int, dict[str, Any]] = {}
-        metric_payload: list[dict[str, Any]] = []
-        for metric, family in (
-            [(primary_metric, "primary")]
-            + [(m, "guard") for m in guard_metrics]
-            + [(m, "secondary") for m in secondary_metrics]
-        ):
-            if metric.id in comparisons:
-                continue
-            computed = _compute_metric(metric, control_rows, treat_rows, alpha)
-            computed["family"] = family
-            comparisons[metric.id] = computed
-            metric_payload.append(computed)
-
-        # ---- 3) 守卫指标回归判定（守卫族内 BH）----
-        guards = _evaluate_guards(guard_metrics, comparisons, alpha)
-
-        # ---- 4) 分层分析（城市 × 客群，分层内 BH）----
-        strata = _strata_tests(primary_metric, assignments, control.id, treat.id, alpha)
-
-        # ---- 5) 全量 BH：primary + guards + secondary + 分层合并一个 family ----
-        all_tests: list[dict[str, Any]] = []
-        for entry in metric_payload:
-            stat = entry["stat"]
-            all_tests.append(
-                {
-                    "family": entry["family"],
-                    "label": f"{entry['metric']['name']}（{entry['family']}）",
-                    "metric_code": entry["metric"]["code"],
-                    "p_value": stat["p_value"],
-                }
-            )
-        for cell in strata["cells"]:
-            if cell.get("p_value") is None:
-                continue
-            all_tests.append(
-                {
-                    "family": "strata",
-                    "label": f"{cell['segment_city']}·{cell['segment_tenure']} 分层",
-                    "metric_code": primary_metric.code,
-                    "p_value": cell["p_value"],
-                }
-            )
-        full_family = adjust_family(all_tests, alpha=alpha)
-
-        # ---- 6) 固定规则结论 ----
-        verdict, reasons, locked = _decide(
-            experiment,
-            srm,
-            comparisons[primary_metric.id],
-            guards,
-            strata,
-            alpha,
-            min_sample,
-            len(control_rows),
-            len(treat_rows),
+        # ---- 1) 全实验 SRM（曝光口径，df=k−1）----
+        observed_all = [counts[v.id]["exposures"] for v in variants]
+        ratio_all = [v.traffic_allocation for v in variants]
+        total_ratio = sum(ratio_all) or 1.0
+        srm_global = srm_test(
+            observed_all,
+            [r / total_ratio for r in ratio_all],
+            threshold=srm_threshold,
+            min_exposures=settings.min_srm_exposures,
         )
+        srm_global["unit"] = "exposure"
+        srm_global["variant_codes"] = [v.code for v in variants]
+        srm_global["variant_names"] = [v.name for v in variants]
 
-        return {
-            "srm": srm,
-            "metrics": metric_payload,
-            "strata": strata,
-            "guard": guards,
-            "comparisons": all_tests,
-            "full_family": full_family,
-            "verdict": verdict,
-            "verdict_reasons": reasons,
-            "locked": locked,
-            "sample": {
-                "control_users": len(control_rows),
-                "treat_users": len(treat_rows),
-                "control_exposures": counts[control.id]["exposures"],
-                "treat_exposures": counts[treat.id]["exposures"],
-                "min_sample_per_arm": min_sample,
-            },
-            "variant_codes": [control.code, treat.code],
+        # ---- 2) 逐方案：配对 SRM + 指标 + 守卫族 BH + 分层内 BH ----
+        arm_pieces: list[dict[str, Any]] = []
+        all_tests: list[dict[str, Any]] = []
+        for treat in treats:
+            treat_rows = grouped[treat.id]
+
+            pair_ratio = [control.traffic_allocation, treat.traffic_allocation]
+            pair_total = sum(pair_ratio) or 1.0
+            srm_pair = srm_test(
+                [counts[control.id]["exposures"], counts[treat.id]["exposures"]],
+                [r / pair_total for r in pair_ratio],
+                threshold=srm_threshold,
+                min_exposures=settings.min_srm_exposures,
+            )
+            srm_pair["unit"] = "exposure"
+            srm_pair["variant_codes"] = [control.code, treat.code]
+            srm_pair["variant_names"] = [control.name, treat.name]
+
+            comparisons: dict[int, dict[str, Any]] = {}
+            metric_payload: list[dict[str, Any]] = []
+            for metric, family in (
+                [(primary_metric, "primary")]
+                + [(m, "guard") for m in guard_metrics]
+                + [(m, "secondary") for m in secondary_metrics]
+            ):
+                if metric.id in comparisons:
+                    continue
+                computed = _compute_metric(metric, control_rows, treat_rows, alpha)
+                computed["family"] = family
+                comparisons[metric.id] = computed
+                metric_payload.append(computed)
+
+            guards = _evaluate_guards(guard_metrics, comparisons, alpha)
+            strata = _strata_tests(primary_metric, assignments, control.id, treat.id, alpha)
+
+            family_label = {"primary": "主指标", "guard": "守卫指标", "secondary": "辅助指标"}
+            for entry in metric_payload:
+                label = (
+                    f"{treat.name} · {entry['metric']['name']}（{family_label[entry['family']]}）"
+                    if multi_arm
+                    else f"{entry['metric']['name']}（{entry['family']}）"
+                )
+                all_tests.append(
+                    {
+                        "arm_code": treat.code,
+                        "arm_name": treat.name,
+                        "family": entry["family"],
+                        "label": label,
+                        "metric_code": entry["metric"]["code"],
+                        "cell_key": None,
+                        "p_value": entry["stat"]["p_value"],
+                    }
+                )
+            for cell in strata["cells"]:
+                if cell.get("p_value") is None:
+                    continue
+                cell_key = f"{cell['segment_city']}|{cell['segment_tenure']}"
+                label = (
+                    f"{treat.name} · {cell['segment_city']}·{cell['segment_tenure']} 分层"
+                    if multi_arm
+                    else f"{cell['segment_city']}·{cell['segment_tenure']} 分层"
+                )
+                all_tests.append(
+                    {
+                        "arm_code": treat.code,
+                        "arm_name": treat.name,
+                        "family": "strata",
+                        "label": label,
+                        "metric_code": primary_metric.code,
+                        "cell_key": cell_key,
+                        "p_value": cell["p_value"],
+                    }
+                )
+
+            arm_pieces.append(
+                {
+                    "treat": treat,
+                    "srm_pair": srm_pair,
+                    "metrics": metric_payload,
+                    "guard": guards,
+                    "strata": strata,
+                    "comparisons": comparisons,
+                    "control_n": len(control_rows),
+                    "treat_n": len(treat_rows),
+                    "control_exposures": counts[control.id]["exposures"],
+                    "treat_exposures": counts[treat.id]["exposures"],
+                }
+            )
+
+        # ---- 3) 全量 BH：两臂时与历史口径一致；多臂时跨全部方案合并一个 family ----
+        full_family = adjust_family(all_tests, alpha=alpha)
+        full_index: dict[tuple[str, str, str | None], dict[str, Any]] = {
+            (row["arm_code"], row["family"], row.get("metric_code") if row["family"] != "strata" else row.get("cell_key")): row
+            for row in all_tests
         }
+
+        # ---- 4) 回填全量 BH 结果并逐方案判定 ----
+        arm_payloads: list[dict[str, Any]] = []
+        rollup: dict[str, int] = defaultdict(int)
+        rollup_reasons: list[str] = []
+        for piece in arm_pieces:
+            treat = piece["treat"]
+            for entry in piece["metrics"]:
+                row = full_index[(treat.code, entry["family"], entry["metric"]["code"])]
+                entry["full_bh_q_value"] = row["q_value"]
+                entry["full_bh_rank"] = row["rank"]
+                entry["full_bh_reject"] = row["reject"]
+            for cell in piece["strata"]["cells"]:
+                if cell.get("p_value") is None:
+                    cell["full_bh_q_value"] = None
+                    cell["full_bh_rank"] = None
+                    cell["full_bh_reject"] = False
+                    continue
+                row = full_index[
+                    (treat.code, "strata", f"{cell['segment_city']}|{cell['segment_tenure']}")
+                ]
+                cell["full_bh_q_value"] = row["q_value"]
+                cell["full_bh_rank"] = row["rank"]
+                cell["full_bh_reject"] = row["reject"]
+
+            primary_entry = piece["comparisons"][primary_metric.id]
+            primary_row = full_index[(treat.code, "primary", primary_metric.code)]
+            primary_q = primary_row["q_value"]
+            verdict, reasons, ship_state = _decide_arm(
+                variant_code=treat.code,
+                srm_global=srm_global,
+                srm_pair=piece["srm_pair"],
+                primary=primary_entry,
+                guards=piece["guard"],
+                strata=piece["strata"],
+                alpha=alpha,
+                min_sample=min_sample,
+                control_n=piece["control_n"],
+                treat_n=piece["treat_n"],
+                multi_arm=multi_arm,
+                primary_q=primary_q,
+            )
+            rollup[verdict] += 1
+            pstat = primary_entry["stat"]
+            lift_text = (
+                "—" if pstat["lift"] is None else f"{pstat['lift'] * 100:+.2f}%"
+            )
+            rollup_reasons.append(
+                f"方案 {treat.name}（{treat.code}）→ {verdict} / {ship_state}："
+                f"主指标 lift={lift_text}"
+                f"，p={pstat['p_value']}，全方案 BH q={primary_q}"
+                + ("，守卫回归" if piece["guard"]["regression"] else "，守卫无回归")
+            )
+
+            arm_payloads.append(
+                {
+                    "variant": _variant_brief(treat),
+                    "control_variant": _variant_brief(control),
+                    "srm_pair": piece["srm_pair"],
+                    "sample": {
+                        "control_users": piece["control_n"],
+                        "treat_users": piece["treat_n"],
+                        "control_exposures": piece["control_exposures"],
+                        "treat_exposures": piece["treat_exposures"],
+                        "min_sample_per_arm": min_sample,
+                    },
+                    "metrics": piece["metrics"],
+                    "guard": piece["guard"],
+                    "strata": piece["strata"],
+                    "guard_regression": bool(piece["guard"]["regression"]),
+                    "bh_distorted": bool(
+                        pstat["p_value"] is not None
+                        and pstat["p_value"] < alpha
+                        and (primary_q is None or primary_q > alpha)
+                    ),
+                    "primary": {
+                        "metric_code": primary_metric.code,
+                        "metric_name": primary_metric.name,
+                        "kind": primary_metric.kind,
+                        "control_value": primary_entry["control_value"],
+                        "treat_value": primary_entry["treat_value"],
+                        "diff": pstat["diff"],
+                        "lift": pstat["lift"],
+                        "lift_ci95": pstat["lift_ci95"],
+                        "p_value": pstat["p_value"],
+                        "q_value": primary_q,
+                        "bh_reject": bool(primary_row["reject"]),
+                        "bh_rank": primary_row["rank"],
+                        "mde_required": pstat.get("mde_required"),
+                    },
+                    "verdict": verdict,
+                    "verdict_reasons": reasons,
+                    "ship_state": ship_state,
+                }
+            )
+
+        # ---- 5) 批次级结论与锁定 ----
+        locked = srm_global["verdict"] in (
+            SrmVerdict.DETECTED.value,
+            SrmVerdict.INSUFFICIENT.value,
+        )
+        if locked:
+            overall_verdict = Verdict.UNREADABLE.value
+            overall_reasons = [
+                f"SRM 分流失衡/曝光不足：{srm_global['reason']}",
+                "全实验结论锁定为「不可读」，所有方案均不可采信，需先修分流器/埋点后重跑",
+            ] + rollup_reasons
+        elif not multi_arm:
+            overall_verdict = arm_payloads[0]["verdict"]
+            overall_reasons = arm_payloads[0]["verdict_reasons"]
+        else:
+            # 多臂：各方案独立判定。只要存在可上线/可观察方案，就按最优可读档给总判定；
+            # 全部方案都不可读时才整体 unreadable
+            if rollup.get(Verdict.PASS.value):
+                overall_verdict = Verdict.PASS.value
+            elif rollup.get(Verdict.WARN.value):
+                overall_verdict = Verdict.WARN.value
+            elif rollup.get(Verdict.FAIL.value):
+                overall_verdict = Verdict.FAIL.value
+            else:
+                overall_verdict = Verdict.UNREADABLE.value
+            winners = [a["variant"]["name"] for a in arm_payloads if a["verdict"] == Verdict.PASS.value]
+            overall_reasons = [
+                "多臂实验：所有处理方案以同一对照臂为共同对照，全部检验合并进同一个 BH family "
+                f"（m={full_family['m']}，α={alpha}）做误报控制。"
+            ]
+            overall_reasons.extend(rollup_reasons)
+            overall_reasons.append(
+                "可上线方案：" + ("、".join(winners) if winners else "无（守卫生效或校正后失真的方案均被 blocked，不能当赢家）")
+            )
+
+        payload: dict[str, Any] = {
+            "srm": srm_global,
+            "full_family": full_family,
+            "arms": arm_payloads,
+            "verdict": overall_verdict,
+            "verdict_reasons": overall_reasons,
+            "locked": locked,
+            "multi_arm": multi_arm,
+        }
+
+        if not multi_arm:
+            # 两臂：顶层字段保持历史结构，老前端/老报告无感知
+            only = arm_pieces[0]
+            payload.update(
+                {
+                    "metrics": only["metrics"],
+                    "strata": only["strata"],
+                    "guard": only["guard"],
+                    "comparisons": all_tests,
+                    "sample": {
+                        "control_users": only["control_n"],
+                        "treat_users": only["treat_n"],
+                        "control_exposures": only["control_exposures"],
+                        "treat_exposures": only["treat_exposures"],
+                        "min_sample_per_arm": min_sample,
+                    },
+                    "variant_codes": [control.code, only["treat"].code],
+                }
+            )
+        else:
+            # 多臂：顶层只放全实验 SRM 与跨方案 BH 明细，逐方案细节在 arms
+            payload.update(
+                {
+                    "metrics": [],
+                    "strata": None,
+                    "guard": None,
+                    "comparisons": all_tests,
+                    "sample": {
+                        "total_users": sum(counts[v.id]["users"] for v in variants),
+                        "total_exposures": sum(observed_all),
+                        "min_sample_per_arm": min_sample,
+                    },
+                    "variant_codes": [v.code for v in variants],
+                }
+            )
+        return payload

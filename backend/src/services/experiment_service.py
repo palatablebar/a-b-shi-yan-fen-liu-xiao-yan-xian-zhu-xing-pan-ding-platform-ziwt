@@ -129,6 +129,15 @@ class ExperimentService:
                 if entry.get("family") == "primary":
                     primary_lift = entry["stat"]["lift"]
                     primary_p = entry["stat"]["p_value"]
+            # 多臂批次顶层 metrics 为空：取可上线方案（其次第一个方案）的主指标作摘要
+            if primary_lift is None and latest_run.arms:
+                winner = next(
+                    (arm for arm in latest_run.arms if arm.get("ship_state") == "ship_eligible"),
+                    latest_run.arms[0],
+                )
+                primary_summary = winner.get("primary") or {}
+                primary_lift = primary_summary.get("lift")
+                primary_p = primary_summary.get("p_value")
             latest_payload = {
                 "id": latest_run.id,
                 "run_code": latest_run.run_code,

@@ -11,6 +11,7 @@ export type Verdict = 'pass' | 'warn' | 'fail' | 'unreadable';
 export type SrmVerdict = 'ok' | 'detected' | 'insufficient';
 export type DecisionKind = 'ship' | 'kill' | 'continue';
 export type GuardState = 'ok' | 'improved' | 'regression' | 'inconclusive';
+export type ShipState = 'ship_eligible' | 'watch_only' | 'blocked';
 
 export interface User {
   id: number;
@@ -98,6 +99,10 @@ export interface MetricComparison {
   control_value: number | null;
   treat_value: number | null;
   stat: MetricStat;
+  // 多臂实验：全方案统一 BH 回填（两臂批次也有同口径全量 BH）
+  full_bh_q_value?: number | null;
+  full_bh_rank?: number | null;
+  full_bh_reject?: boolean;
 }
 
 export interface StrataCell {
@@ -116,6 +121,10 @@ export interface StrataCell {
   significant_bh: boolean;
   note: string;
   stat?: MetricStat;
+  // 多臂实验：跨方案全量 BH 回填
+  full_bh_q_value?: number | null;
+  full_bh_rank?: number | null;
+  full_bh_reject?: boolean;
 }
 
 export interface FamilyResult {
@@ -169,6 +178,62 @@ export interface ComparisonRow {
   q_value: number | null;
   rank: number | null;
   reject: boolean;
+  // 多臂实验
+  arm_code?: string;
+  arm_name?: string;
+  cell_key?: string | null;
+}
+
+export interface ArmPrimarySummary {
+  metric_code: string;
+  metric_name: string;
+  kind: MetricKind;
+  control_value: number | null;
+  treat_value: number | null;
+  diff: number | null;
+  lift: number | null;
+  lift_ci95: [number, number] | null;
+  p_value: number | null;
+  q_value: number | null;
+  bh_reject: boolean;
+  bh_rank: number | null;
+  mde_required: MdeRequired | null;
+}
+
+export interface ArmResult {
+  variant: {
+    id: number;
+    code: string;
+    name: string;
+    traffic_allocation: number;
+    is_control: boolean;
+    description: string;
+  };
+  control_variant: {
+    id: number;
+    code: string;
+    name: string;
+    traffic_allocation: number;
+    is_control: boolean;
+    description: string;
+  };
+  srm_pair: SrmResult;
+  sample: {
+    control_users: number;
+    treat_users: number;
+    control_exposures: number;
+    treat_exposures: number;
+    min_sample_per_arm: number;
+  };
+  metrics: MetricComparison[];
+  guard: GuardResult;
+  strata: StrataResult;
+  guard_regression: boolean;
+  bh_distorted: boolean;
+  primary: ArmPrimarySummary;
+  verdict: Verdict;
+  verdict_reasons: string[];
+  ship_state: ShipState;
 }
 
 export interface ExperimentSummary {
@@ -221,6 +286,7 @@ export interface RunDetail {
   strata: StrataResult | null;
   comparisons: ComparisonRow[] | null;
   guard: GuardResult | null;
+  arms: ArmResult[] | null;
   verdict_reasons: string[] | null;
   error: string | null;
   started_at: string | null;
@@ -324,6 +390,8 @@ export interface SegmentView {
   };
   strata: StrataResult;
   primary: MetricComparison | null;
+  multi_arm?: boolean;
+  arms?: ArmResult[] | null;
 }
 
 export interface AuditLog {

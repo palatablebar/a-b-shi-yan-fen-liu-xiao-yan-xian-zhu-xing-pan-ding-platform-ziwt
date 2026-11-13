@@ -113,6 +113,7 @@ def segments(experiment_id: int, db: Session) -> dict:
         if entry.get("family") == "primary":
             primary = entry
             break
+    multi_arm = bool((run.params or {}).get("multi_arm"))
     return {
         "experiment": {
             "id": experiment.id,
@@ -130,4 +131,6 @@ def segments(experiment_id: int, db: Session) -> dict:
         },
         "strata": run.strata or {},
         "primary": primary,
+        "multi_arm": multi_arm,
+        "arms": run.arms if multi_arm else None,
     }

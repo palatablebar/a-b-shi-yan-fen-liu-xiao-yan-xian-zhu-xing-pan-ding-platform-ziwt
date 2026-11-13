@@ -1313,3 +1313,40 @@ code,
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 多臂实验：方案状态 chips（详情页判定摘要内嵌） */
+.arm-chip-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+
+.arm-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--ink-faint);
+  background: var(--paper-raised);
+  padding: 10px 12px;
+}
+
+.arm-chip.ship_eligible {
+  border-left-color: var(--ok);
+  background: var(--ok-wash);
+}
+
+.arm-chip.watch_only {
+  border-left-color: var(--warn);
+  background: var(--warn-wash);
+}
+
+.arm-chip.blocked {
+  border-left-color: var(--fail);
+  background: var(--fail-wash);
+}
+
+.arm-chip-name {
+  font-size: 13px;
+  font-weight: 600;
+}

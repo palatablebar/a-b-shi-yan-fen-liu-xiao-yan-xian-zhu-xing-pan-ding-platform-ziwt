@@ -93,17 +93,17 @@ class AssignmentService:
         )
 
     def segment_cells(self, experiment: Experiment) -> list[dict]:
-        """按 城市 × 客群 分组，返回单元格样本量（用于分层页头部）。"""
+        """按 城市 × 客群 分组，返回各变体在单元格内的样本量（用于分层页头部，支持多臂）。"""
         assignments = load_assignments(self.db, experiment.id)
         variants = ordered_variants(experiment)
-        control_id, treat_id = variants[0].id, variants[1].id
-        cells: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: {"control": 0, "treat": 0})
+        variant_ids = [variant.id for variant in variants]
+        cells: dict[tuple[str, str], dict[int, int]] = defaultdict(
+            lambda: {vid: 0 for vid in variant_ids}
+        )
         for row in assignments:
             key = (row.segment_city, row.segment_tenure)
-            if row.variant_id == control_id:
-                cells[key]["control"] += 1
-            elif row.variant_id == treat_id:
-                cells[key]["treat"] += 1
+            if row.variant_id in cells[key]:
+                cells[key][row.variant_id] += 1
         ordered_keys = [
             (city, tenure)
             for city in CITY_ORDER
@@ -112,14 +112,17 @@ class AssignmentService:
         ]
         out = []
         for city, tenure in ordered_keys:
-            counts = cells[(city, tenure)]
+            cell_counts = cells[(city, tenure)]
+            sizes = [cell_counts[vid] for vid in variant_ids]
             out.append(
                 {
                     "segment_city": city,
                     "segment_tenure": tenure,
-                    "control_n": counts["control"],
-                    "treat_n": counts["treat"],
-                    "testable": min(counts["control"], counts["treat"]) >= MIN_STRATUM_PER_ARM,
+                    "variant_codes": [v.code for v in variants],
+                    "variant_n": sizes,
+                    "control_n": cell_counts[variants[0].id],
+                    "treat_n": cell_counts[variants[1].id] if len(variants) > 1 else 0,
+                    "testable": min(sizes) >= MIN_STRATUM_PER_ARM,
                 }
             )
         return out

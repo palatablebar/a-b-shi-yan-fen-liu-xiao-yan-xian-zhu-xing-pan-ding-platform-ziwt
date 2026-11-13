@@ -7,9 +7,10 @@ import type { MetricKind } from '../../types/models';
 interface BhTableProps {
   strata: StrataResult;
   kind: MetricKind;
+  showFullBh?: boolean;
 }
 
-export const BhTable = ({ strata, kind }: BhTableProps) => {
+export const BhTable = ({ strata, kind, showFullBh = false }: BhTableProps) => {
   const columns: Column<StrataResult['cells'][number]>[] = [
     {
       key: 'cell',
@@ -66,10 +67,24 @@ export const BhTable = ({ strata, kind }: BhTableProps) => {
     },
     {
       key: 'q',
-      label: 'q 值 (BH)',
+      label: '分层内 q (BH)',
       align: 'right',
       render: (row) => <span className={row.significant_bh ? 'sig-text' : ''}>{fmtQ(row.q_value)}</span>,
     },
+    ...(showFullBh
+      ? [
+          {
+            key: 'q_full',
+            label: '全方案 q (BH)',
+            align: 'right' as const,
+            render: (row: StrataResult['cells'][number]) => (
+              <span className={row.full_bh_reject ? 'sig-text' : ''}>
+                {fmtQ(row.full_bh_q_value ?? null)}
+              </span>
+            ),
+          },
+        ]
+      : []),
     {
       key: 'verdict',
       label: '判定',

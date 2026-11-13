@@ -11,7 +11,10 @@
   6 个分层中 2 个原始显著但 BH 校正后不显著，守卫指标无回归 → verdict=warn；
 - 实验 C `exp_reco_rank_1022`：主指标 retention_d1 lift +50%、p≈0.0034，分层方向一致 → pass，
   已由增长负责人落「上线」决策；
-- 实验 D `exp_onboard_modal_1108`：刚开跑，只有 100 条分桶（每臂 50），尚无分析批次。
+- 实验 D `exp_onboard_modal_1108`：刚开跑，只有 100 条分桶（每臂 50），尚无分析批次；
+- 实验 E `exp_home_copy_1113`：首页文案三组流量（原版共同对照 + 短文案 + 领券文案，3 变体），
+  短文案主指标原始显著且全方案统一 BH 后仍显著、守卫无回归 → pass（唯一可上线赢家）；
+  领券文案主指标原始显著但 BH 校正后失真、且客诉率守卫显著变差 → fail/blocked，不能当赢家。
 
 赋值数据全部由固定种子确定性生成并在落库前按目标均值/标准差标准化，
 因此同一份 seed 在任意机器上算出同一组 p 值/CI（可复现）。
@@ -324,6 +327,74 @@ EXPERIMENT_SPECS: list[dict[str, Any]] = [
         },
         "seed_run": False,
     },
+    {
+        # 三臂：原版（共同对照）/ 短文案 / 领券文案，全方案合并一个 BH family
+        "code": "exp_home_copy_1113",
+        "name": "首页文案三方案流量",
+        "hypothesis": "更精炼或带利益点的首页文案能提升下单转化率，且不推高客诉与工单。",
+        "description": "首页主行动区文案同时跑三组：原版文案（共同对照）、短文案、领券文案，流量配比 34/33/33。",
+        "owner_name": "林蔚然 · 增长负责人",
+        "status": ExperimentStatus.RUNNING.value,
+        "primary_metric": "order_conversion",
+        "guard_metrics": ["complaint_rate", "ticket_rate"],
+        "secondary_metrics": ["retention_d1"],
+        "start_date": date(2026, 11, 6),
+        "end_date": date(2026, 11, 13),
+        "notes": (
+            "三方案共用同一对照臂：分析时逐组对账分桶曝光与流量配比，主/守卫/分层检验全部并入"
+            "同一个 BH family 控制误报；领券文案已有分桶数据，重点看校正后是否失真、守卫是否回归。"
+        ),
+        "variants": [
+            ("control", "分组 A · 原版文案", 0.34, True, "原首页行动区文案（共同对照）"),
+            ("short_copy", "分组 B · 短文案", 0.33, False, "精简版文案，去掉修饰语"),
+            ("coupon_copy", "分组 C · 领券文案", 0.33, False, "突出「领 8 元券」利益点"),
+        ],
+        "arms": {
+            "control": {
+                "users": 1200,
+                "exposures": 2420,
+                "flags": {
+                    "order_conversion": 269,
+                    "complaint_rate": 36,
+                    "ticket_rate": 26,
+                    "retention_d1": 382,
+                },
+                "mean": BASE_MEAN,
+                "sd": DEFAULT_SD,
+                "seed_base": 1100,
+                "step": 17,
+            },
+            "short_copy": {
+                "users": 1200,
+                "exposures": 2350,
+                "flags": {
+                    "order_conversion": 343,
+                    "complaint_rate": 36,
+                    "ticket_rate": 27,
+                    "retention_d1": 390,
+                },
+                "mean": BASE_MEAN,
+                "sd": DEFAULT_SD,
+                "seed_base": 5100,
+                "step": 31,
+            },
+            "coupon_copy": {
+                "users": 1200,
+                "exposures": 2380,
+                "flags": {
+                    "order_conversion": 317,
+                    "complaint_rate": 66,
+                    "ticket_rate": 29,
+                    "retention_d1": 385,
+                },
+                "mean": BASE_MEAN,
+                "sd": DEFAULT_SD,
+                "seed_base": 9100,
+                "step": 37,
+            },
+        },
+        "seed_run": True,
+    },
 ]
 
 RATIO_METRIC_CODES = [spec["code"] for spec in METRIC_SPECS if spec["kind"] == MetricKind.RATIO.value]
@@ -391,7 +462,9 @@ def _cell_sizes(users: int, given: list[int] | None) -> list[int]:
 def _build_assignments(spec: dict[str, Any], experiment_id: int, variant_ids: dict[str, int]) -> list[Assignment]:
     rows: list[Assignment] = []
     start = spec["start_date"] or date(2026, 11, 1)
-    for arm_key, variant_code in (("control", "control"), ("treatment", "treatment")):
+    # 兼容两臂（control/treatment）与多臂（variants 里声明的任意 arm key）
+    arm_keys = [variant_code for variant_code, *_ in spec["variants"]]
+    for arm_key, variant_code in ((key, key) for key in arm_keys):
         arm = spec["arms"][arm_key]
         users = int(arm["users"])
         sizes = _cell_sizes(users, arm.get("cell_sizes"))
@@ -532,7 +605,10 @@ def seed_experiments(db, metrics: dict[str, Metric]) -> dict[str, dict[str, Any]
 
         db.commit()
 
-        expected = sum(int(spec["arms"][arm]["users"]) for arm in ("control", "treatment"))
+        expected = sum(
+            int(spec["arms"][arm_code]["users"])
+            for arm_code, *_ in spec["variants"]
+        )
         existing_keys = {
             key
             for (key,) in db.query(Assignment.user_key)
@@ -579,6 +655,7 @@ def seed_runs(db, seeded: dict[str, dict[str, Any]], users: dict[str, User]) -> 
                     "srm_unit": "exposure",
                     "metric_unit": "user",
                     "mde_power": 0.8,
+                    "multi_arm": len(experiment.variants) > 2,
                 },
                 started_at=utcnow(),
             )
@@ -590,6 +667,7 @@ def seed_runs(db, seeded: dict[str, dict[str, Any]], users: dict[str, User]) -> 
             run.strata = payload["strata"]
             run.comparisons = payload["comparisons"]
             run.guard = payload["guard"]
+            run.arms = payload.get("arms")
             run.verdict = payload["verdict"]
             run.verdict_reasons = payload["verdict_reasons"]
             run.locked = payload["locked"]

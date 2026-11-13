@@ -42,13 +42,18 @@
 
 ## 2. 主要功能
 
-- **实验台账**：4 个实验 / 8 个变体 / 5 个指标 / 3,800 条分桶曝光，按状态筛选；
+- **实验台账**：5 个实验 / 11 个变体 / 5 个指标 / 7,400 条分桶曝光，按状态筛选；
+- **多臂共同对照**：支持 1 个共同对照 + 多处理方案（如首页文案原版/短文案/领券文案三组流量），
+  逐组对账分桶曝光与流量配比（全实验 SRM + 配对 SRM），每个方案独立判定并给可上线状态；
 - **分流校验（SRM）**：卡方拟合优度 `χ² = Σ(O−E)²/E`，`p < 0.001` 直接锁定结论 `unreadable`；
 - **指标对比**：比例指标两比例 z 检验（合并方差），均值指标 Welch t；输出 `lift / lift_ci95 / p_value / mde_required`；
 - **分层下钻 + 多重比较**：城市 × 新老客 6 个分层，分层内 BH FDR 一次、全量（主/守卫/辅助/分层合并）BH 一次；
-- **守卫指标回归**：显著变差（方向按指标定义）→ 结论降级 `fail`；
+  多臂时全部方案的检验并入**同一个 BH family**，同一套误报控制下比较所有方案；
+- **守卫指标回归**：显著变差（方向按指标定义）→ 该方案结论降级 `fail` / `blocked`；
 - **固定规则结论**：`pass / warn / fail / unreadable` 四档 + 可读的理由清单；
-- **报告与决策**：Markdown 报告 + CSV 明细导出；决策记录（上线/下线/继续观察）+ 审计留痕。
+  多臂另给 `ship_eligible / watch_only / blocked` 可上线状态，守卫生效或校正后失真的方案不能当赢家；
+- **报告与决策**：Markdown 报告 + CSV 明细导出（多臂报告含逐方案对照关系、校正前后 p/q 与可上线状态）；
+  决策记录（上线/下线/继续观察）+ 审计留痕。
 
 ## 3. 快速启动
 
@@ -72,7 +77,7 @@ docker compose exec backend python -m scripts.seed_demo
 ```
 
 幂等：自然键 upsert，重复执行不新增、不覆盖用户修改；结束打印一行
-`SEED_SUMMARY brand=abcheck experiments=4 variants=8 metrics=5 assignments=3800 runs=3 users=3`。
+`SEED_SUMMARY brand=abcheck experiments=5 variants=11 metrics=5 assignments=7400 runs=4 users=3`。
 
 **演示账号**（密码统一 `Demo@2026`）
 
@@ -99,8 +104,8 @@ docker compose exec backend python -m scripts.seed_demo
 gb-573/
 ├── backend/
 │   ├── src/{config,constants,models,schemas,services,controllers,routes,middlewares,utils}
-│   ├── scripts/seed_demo.py          # 幂等 seed（含确定性分桶数据）
-│   ├── migrations/                   # Alembic（0001_initial 由 metadata 建表）
+│   ├── scripts/seed_demo.py          # 幂等 seed（含确定性分桶数据与三臂文案实验）
+│   ├── migrations/                   # Alembic（0001 metadata 建表 + 0002 多臂 arms 列）
 │   └── entrypoint.sh                 # alembic upgrade head → uvicorn
 ├── worker/                           # Celery worker + beat 心跳 + 分析任务
 ├── frontend/src/{api,stores,types,components/{common,business,layout},hooks,pages,router,utils,constants,styles}
@@ -125,19 +130,20 @@ gb-573/
 | 枚举组 | 后端 | 前端 |
 |---|---|---|
 | 角色 admin/analyst/pm | `backend/src/constants/roles.py` | `frontend/src/constants/roles.ts` |
-| 指标 kind/role/direction、实验状态、批次状态、SRM、结论、决策 | `backend/src/constants/enums.py` | `frontend/src/constants/enums.ts` |
+| 指标 kind/role/direction、实验状态、批次状态、SRM、结论、决策、多臂可上线状态 ship_state | `backend/src/constants/enums.py` | `frontend/src/constants/enums.ts` |
 
 另外：`backend/src/models/*.py` 的字符串列、`frontend/src/types/models.ts` 的联合类型、
 `docs/口径与判定规则.md` 与 `README` 的权限表均引用同一套枚举。
 
 ## 8. 算法口径（详见 `docs/口径与判定规则.md`）
 
-- SRM：`χ² = Σ(O−E)²/E`，`df=k−1`，`p<0.001` → `unreadable` 且结论锁定；
+- SRM：`χ² = Σ(O−E)²/E`，`df=k−1`，`p<0.001` → `unreadable` 且结论锁定；多臂另做逐方案配对 SRM（df=1）；
 - 比例指标：`z=(p_t−p_c)/√(p̄(1−p̄)(1/n_c+1/n_t))`，lift CI 用非合并方差标准误；
 - 均值指标：Welch t（Welch–Satterthwaite 自由度）；
 - `mde_required`：`(z_{1−α/2}+z_{0.8})·SE`，同时给绝对值与相对值；
-- 多重比较：Benjamini–Hochberg，`q_i = min_{k≥i}(p_k·m/k)`；
+- 多重比较：Benjamini–Hochberg，`q_i = min_{k≥i}(p_k·m/k)`；多臂时所有方案的全部检验合并一个 family；
 - 结论固定规则：SRM/样本不足→unreadable；守卫回归或主指标不显著→fail；
+  多臂主指标原始显著但全方案 BH 后失真（q>α）→ fail/blocked；
   分层异质性（≥2 个分层原始显著但 BH 后不显著）/分层反向显著/观测效应低于 MDE→warn；其余 pass。
 
 ## 9. 本地开发（不走 Docker）

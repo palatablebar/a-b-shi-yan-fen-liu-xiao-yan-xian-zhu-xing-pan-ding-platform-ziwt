@@ -25,6 +25,8 @@ class AnalysisRun(Base, TimestampMixin):
     strata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     comparisons: Mapped[list | None] = mapped_column(JSON, nullable=True)
     guard: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 多臂（>2 变体）实验：每个处理方案一条 arm 结果（共同对照、逐臂 SRM/指标/守卫/分层/校正/可上线状态）
+    arms: Mapped[list | None] = mapped_column(JSON, nullable=True)
     verdict: Mapped[str | None] = mapped_column(String(16), nullable=True)
     verdict_reasons: Mapped[list | None] = mapped_column(JSON, nullable=True)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

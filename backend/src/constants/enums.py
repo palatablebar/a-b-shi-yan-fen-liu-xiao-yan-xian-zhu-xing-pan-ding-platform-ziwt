@@ -62,3 +62,11 @@ class GuardState(str, Enum):
     IMPROVED = "improved"
     REGRESSION = "regression"
     INCONCLUSIVE = "inconclusive"
+
+
+class ShipState(str, Enum):
+    """多臂实验中单个处理方案的可上线状态（与四档 verdict 配套）。"""
+
+    SHIP_ELIGIBLE = "ship_eligible"  # verdict=pass：唯一可放量的赢家
+    WATCH_ONLY = "watch_only"        # verdict=warn：只能继续观察/带风险评审
+    BLOCKED = "blocked"              # verdict=fail/unreadable：守卫生效或校正失真，禁止当赢家

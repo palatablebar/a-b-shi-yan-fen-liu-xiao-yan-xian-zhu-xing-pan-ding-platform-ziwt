@@ -8,7 +8,7 @@ import { useRunStore } from '../stores/runStore';
 import type { RunDetail } from '../types/models';
 import { EXPERIMENT_STATUS_LABEL, SRM_LABEL } from '../constants/enums';
 import { srmTone, statusTone, verdictTone } from '../utils/display';
-import { fmtDateTime, fmtInt, fmtLift, fmtP } from '../utils/format';
+import { fmtDateTime, fmtInt, fmtLift, fmtP, fmtQ } from '../utils/format';
 import { SheetPanel } from '../components/common/SheetPanel';
 import { StatusPill } from '../components/common/StatusPill';
 import { VerdictStamp } from '../components/common/VerdictStamp';
@@ -23,6 +23,7 @@ import { SrmBlock } from '../components/business/SrmBlock';
 import { VariantSplit } from '../components/business/VariantSplit';
 import { MetricContrastTable } from '../components/business/MetricContrastTable';
 import { GuardGrid } from '../components/business/GuardGrid';
+import { MultiArmBoard } from '../components/business/MultiArmBoard';
 import { downloadReport } from '../api/report';
 import { errorMessage } from '../utils/errorMessage';
 
@@ -62,6 +63,7 @@ export const ExperimentDetailPage = () => {
   const broken = srm?.verdict === 'detected';
   const stepCurrent = !latest ? 1 : latest.status === 'succeeded' ? (experiment.decision ? 5 : 4) : 2;
   const primaryComparison = run?.metrics?.find((entry) => entry.family === 'primary') ?? null;
+  const multiArm = run?.params?.multi_arm === true || (run?.arms?.length ?? 0) > 0;
 
   const onTrigger = async () => {
     setBusy(true);
@@ -166,6 +168,19 @@ export const ExperimentDetailPage = () => {
             ) : (
               <p className="hint">尚无判定理由：触发一次分析后写入。</p>
             )}
+            {multiArm && run?.arms?.length ? (
+              <div className="arm-chip-row" style={{ marginTop: 10 }}>
+                {run.arms.map((arm) => (
+                  <div key={arm.variant.code} className={`arm-chip ${arm.ship_state}`}>
+                    <span className="arm-chip-name">{arm.variant.name}</span>
+                    <VerdictStamp verdict={arm.verdict} animate={false} />
+                    <span className="hint mono">
+                      p={fmtP(arm.primary.p_value)} / q={fmtQ(arm.primary.q_value)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {actionError ? (
               <div className="annotation" role="alert">
                 <span className="annotation-label">错误</span>
@@ -221,65 +236,98 @@ export const ExperimentDetailPage = () => {
         </div>
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <SheetPanel
-          title="指标对比"
-          index="D"
-          note={run ? `${run.run_code} · 用户级样本` : '等待分析批次'}
-          actions={
-            run ? (
-              <Link className="inline-link" to="/runs">
-                查看完整批次 →
-              </Link>
-            ) : null
-          }
-        >
-          {run?.metrics?.length ? (
-            <MetricContrastTable metrics={run.metrics} alpha={experiment.alpha} />
-          ) : latest ? (
-            <p className="loading-note">正在读取批次明细…</p>
-          ) : (
-            <EmptyState
-              title="还没有分析批次"
-              action={
-                <RequireRole action="runs:trigger">
-                  <button className="btn small ink" onClick={onTrigger} disabled={busy}>
-                    触发首次分析
-                  </button>
-                </RequireRole>
+      {multiArm && run ? (
+        <div style={{ marginTop: 16 }}>
+          <MultiArmBoard run={run} alpha={experiment.alpha} />
+        </div>
+      ) : (
+        <>
+          <div style={{ marginTop: 16 }}>
+            <SheetPanel
+              title="指标对比"
+              index="D"
+              note={run ? `${run.run_code} · 用户级样本` : '等待分析批次'}
+              actions={
+                run ? (
+                  <Link className="inline-link" to="/runs">
+                    查看完整批次 →
+                  </Link>
+                ) : null
               }
             >
-              具备 admin / analyst 角色时可以触发分析：后端会在 Celery worker 里真算 SRM 卡方、
-              两比例 z（或 Welch t）、分层 BH 与守卫指标回归，结果落库后本页自动刷新。
-            </EmptyState>
-          )}
-        </SheetPanel>
-      </div>
+              {run?.metrics?.length ? (
+                <MetricContrastTable metrics={run.metrics} alpha={experiment.alpha} />
+              ) : latest ? (
+                <p className="loading-note">正在读取批次明细…</p>
+              ) : (
+                <EmptyState
+                  title="还没有分析批次"
+                  action={
+                    <RequireRole action="runs:trigger">
+                      <button className="btn small ink" onClick={onTrigger} disabled={busy}>
+                        触发首次分析
+                      </button>
+                    </RequireRole>
+                  }
+                >
+                  具备 admin / analyst 角色时可以触发分析：后端会在 Celery worker 里真算 SRM 卡方、
+                  两比例 z（或 Welch t）、分层 BH 与守卫指标回归，结果落库后本页自动刷新。
+                </EmptyState>
+              )}
+            </SheetPanel>
+          </div>
 
-      <div style={{ marginTop: 16 }} className="split split-2">
-        <SheetPanel title="守卫指标" index="E" note="显著变差 → 结论降级 fail">
-          <GuardGrid guard={run?.guard ?? null} />
-        </SheetPanel>
-        <SheetPanel title="实验假设与口径" index="F" note={experiment.created_by}>
-          <p style={{ fontSize: 14 }}>{experiment.hypothesis || '未填写实验假设。'}</p>
-          <p className="hint" style={{ marginTop: 8 }}>
-            {experiment.description || '无补充描述'}
-          </p>
-          <dl className="kv" style={{ marginTop: 12 }}>
-            <dt>守卫指标</dt>
-            <dd>{experiment.guard_metrics.map((metric) => metric.name).join('、') || '未配置'}</dd>
-            <dt>创建人</dt>
-            <dd className="mono">{experiment.created_by || '—'}</dd>
-            <dt>最近更新</dt>
-            <dd className="mono">{fmtDateTime(experiment.updated_at)}</dd>
-          </dl>
-        </SheetPanel>
-      </div>
+          <div style={{ marginTop: 16 }} className="split split-2">
+            <SheetPanel title="守卫指标" index="E" note="显著变差 → 结论降级 fail">
+              <GuardGrid guard={run?.guard ?? null} />
+            </SheetPanel>
+            <SheetPanel title="实验假设与口径" index="F" note={experiment.created_by}>
+              <p style={{ fontSize: 14 }}>{experiment.hypothesis || '未填写实验假设。'}</p>
+              <p className="hint" style={{ marginTop: 8 }}>
+                {experiment.description || '无补充描述'}
+              </p>
+              <dl className="kv" style={{ marginTop: 12 }}>
+                <dt>守卫指标</dt>
+                <dd>{experiment.guard_metrics.map((metric) => metric.name).join('、') || '未配置'}</dd>
+                <dt>创建人</dt>
+                <dd className="mono">{experiment.created_by || '—'}</dd>
+                <dt>最近更新</dt>
+                <dd className="mono">{fmtDateTime(experiment.updated_at)}</dd>
+              </dl>
+            </SheetPanel>
+          </div>
+        </>
+      )}
+      {multiArm ? (
+        <div style={{ marginTop: 16 }}>
+          <SheetPanel title="实验假设与口径" index="F" note={experiment.created_by}>
+            <p style={{ fontSize: 14 }}>{experiment.hypothesis || '未填写实验假设。'}</p>
+            <p className="hint" style={{ marginTop: 8 }}>
+              {experiment.description || '无补充描述'}
+            </p>
+            <dl className="kv" style={{ marginTop: 12 }}>
+              <dt>守卫指标</dt>
+              <dd>{experiment.guard_metrics.map((metric) => metric.name).join('、') || '未配置'}</dd>
+              <dt>创建人</dt>
+              <dd className="mono">{experiment.created_by || '—'}</dd>
+              <dt>最近更新</dt>
+              <dd className="mono">{fmtDateTime(experiment.updated_at)}</dd>
+            </dl>
+          </SheetPanel>
+        </div>
+      ) : null}
       {run ? (
         <p className="hint" style={{ marginTop: 12 }}>
           最近批次 {run.run_code}：SRM p={fmtP(run.srm?.p_value ?? null)}，主指标 lift=
-          {fmtLift(run.metrics?.find((entry) => entry.family === 'primary')?.stat.lift ?? null)}，
-          结论 {run.verdict ?? '—'}。
+          {fmtLift(
+            multiArm
+              ? (run.arms?.find((arm) => arm.ship_state === 'ship_eligible') ?? run.arms?.[0])
+                  ?.primary.lift ?? null
+              : run.metrics?.find((entry) => entry.family === 'primary')?.stat.lift ?? null,
+          )}
+          ，结论 {run.verdict ?? '—'}
+          {multiArm ? `（多方案：可上线 ${run.arms?.filter((arm) => arm.ship_state === 'ship_eligible').length ?? 0} 个）` : ''}
+          。
         </p>
       ) : null}
     </div>

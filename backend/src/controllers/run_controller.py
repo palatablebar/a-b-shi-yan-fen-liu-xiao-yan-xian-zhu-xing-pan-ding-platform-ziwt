@@ -20,6 +20,15 @@ def _summary(db: Session, run) -> RunSummary:
         if entry.get("family") == "primary":
             primary_lift = entry["stat"].get("lift")
             primary_p = entry["stat"].get("p_value")
+    # 多臂批次：取可上线方案（否则第一个方案）的主指标作为列表摘要
+    if primary_lift is None and run.arms:
+        winner = next(
+            (arm for arm in run.arms if arm.get("ship_state") == "ship_eligible"),
+            run.arms[0],
+        )
+        primary_summary = winner.get("primary") or {}
+        primary_lift = primary_summary.get("lift")
+        primary_p = primary_summary.get("p_value")
     experiment = db.get(Experiment, run.experiment_id)
     return RunSummary(
         id=run.id,
@@ -91,6 +100,7 @@ def get_run(run_id: int, db: Session) -> RunDetail:
         strata=run.strata,
         comparisons=run.comparisons,
         guard=run.guard,
+        arms=run.arms,
         verdict_reasons=run.verdict_reasons,
         error=run.error,
         started_at=run.started_at,

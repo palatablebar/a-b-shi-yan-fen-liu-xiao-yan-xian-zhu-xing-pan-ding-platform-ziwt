@@ -7,6 +7,7 @@ import type {
   MetricKind,
   MetricRole,
   RunStatus,
+  ShipState,
   SrmVerdict,
   Verdict,
 } from '../types/models';
@@ -72,6 +73,18 @@ export const GUARD_STATE_LABEL: Record<GuardState, string> = {
   improved: '显著变好',
   regression: '显著变差',
   inconclusive: '无显著变化',
+};
+
+export const SHIP_STATE_LABEL: Record<ShipState, string> = {
+  ship_eligible: '可上线',
+  watch_only: '仅观察',
+  blocked: '禁止上线',
+};
+
+export const SHIP_STATE_HINT: Record<ShipState, string> = {
+  ship_eligible: '主指标经全方案 BH 校正后仍显著，且守卫无回归：本实验唯一可放量的赢家',
+  watch_only: '主指标显著但存在分层异质/功效边界：只能继续观察或带风险评审',
+  blocked: '守卫生效或全方案 BH 校正后失真：不能被当成赢家',
 };
 
 export const DECISION_LABEL: Record<DecisionKind, string> = {

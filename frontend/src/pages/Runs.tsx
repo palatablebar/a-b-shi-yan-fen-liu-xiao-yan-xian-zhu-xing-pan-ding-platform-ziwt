@@ -24,6 +24,7 @@ import { SrmBlock } from '../components/business/SrmBlock';
 import { MetricContrastTable } from '../components/business/MetricContrastTable';
 import { GuardGrid } from '../components/business/GuardGrid';
 import { BhTable } from '../components/business/BhTable';
+import { MultiArmBoard } from '../components/business/MultiArmBoard';
 import type { ComparisonRow, RunDetail, RunSummary } from '../types/models';
 import { useAuthStore } from '../stores/authStore';
 import { errorMessage } from '../utils/errorMessage';
@@ -222,6 +223,60 @@ const RunResult = ({ run, alpha }: { run: RunDetail; alpha: number }) => {
   const strata = run.strata;
   const kind = primary?.kind ?? 'ratio';
   const guardBlocked = run.guard?.regression;
+  const multiArm = run.params?.multi_arm === true || (run.arms?.length ?? 0) > 0;
+
+  if (multiArm && run.arms?.length) {
+    return (
+      <div className="stack">
+        <SheetPanel
+          title="判定结论（多方案共同对照）"
+          index="C"
+          note={run.run_code}
+          actions={<VerdictStamp verdict={run.verdict} large />}
+        >
+          <ul className="reason-list">
+            {(run.verdict_reasons ?? []).map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+          <dl className="kv" style={{ marginTop: 10 }}>
+            <dt>触发人</dt>
+            <dd className="mono">{run.triggered_by}</dd>
+            <dt>处理方案数</dt>
+            <dd className="mono">
+              {run.arms.length} 个（共同对照：{run.arms[0].control_variant.name}）
+            </dd>
+            <dt>统一 BH family</dt>
+            <dd className="mono">m={run.comparisons?.length ?? 0} · α={alpha}</dd>
+            <dt>完成时间</dt>
+            <dd className="mono">{fmtDateTime(run.finished_at)}</dd>
+          </dl>
+          {run.locked ? (
+            <Annotation>
+              分流失衡（SRM）或样本不足 → 结论锁定 unreadable；此时「报告与决策」页会拒绝创建决策记录。
+            </Annotation>
+          ) : null}
+          <Annotation>
+            可上线状态 ship_state：只有 ship_eligible 的方案可以放量；watch_only 仅可继续观察；
+            blocked（守卫生效或全方案 BH 校正后失真）的方案不能被当成赢家。
+          </Annotation>
+        </SheetPanel>
+
+        <MultiArmBoard run={run} alpha={alpha} />
+
+        {run.status === 'succeeded' && run.verdict !== 'unreadable' ? (
+          <p className="hint">
+            下一步：到{' '}
+            <Link className="inline-link" to="/decisions">
+              报告与决策
+            </Link>{' '}
+            落决策记录并导出 MD / CSV。
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <div className="stack">
       <SheetPanel

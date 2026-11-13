@@ -40,6 +40,7 @@ class RunDetail(BaseModel):
     strata: dict | None
     comparisons: list | None
     guard: dict | None
+    arms: list | None = None
     verdict_reasons: list | None
     error: str | None
     started_at: datetime | None

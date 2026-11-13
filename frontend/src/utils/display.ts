@@ -3,6 +3,7 @@ import type {
   ExperimentStatus,
   GuardState,
   RunStatus,
+  ShipState,
   SrmVerdict,
   Verdict,
 } from '../types/models';
@@ -11,7 +12,10 @@ export type Tone = 'ok' | 'warn' | 'fail' | 'unreadable' | 'neutral' | 'red';
 
 export const verdictTone = (verdict: Verdict | null | undefined): Tone => {
   if (!verdict) return 'neutral';
-  return verdict;
+  if (verdict === 'pass') return 'ok';
+  if (verdict === 'warn') return 'warn';
+  if (verdict === 'fail') return 'fail';
+  return 'unreadable';
 };
 
 export const statusTone = (status: ExperimentStatus): Tone => {
@@ -39,6 +43,12 @@ export const guardTone = (state: GuardState): Tone => {
   if (state === 'regression') return 'fail';
   if (state === 'improved') return 'ok';
   return 'neutral';
+};
+
+export const shipStateTone = (state: ShipState): Tone => {
+  if (state === 'ship_eligible') return 'ok';
+  if (state === 'watch_only') return 'warn';
+  return 'fail';
 };
 
 export const directionText = (lift: number | null | undefined): string => {
